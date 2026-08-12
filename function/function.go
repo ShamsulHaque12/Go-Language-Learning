@@ -10,23 +10,33 @@ import "fmt"
 // 	fmt.Println(sum)
 // }
 
-/// function...........
+/// function...........1
 
-func add(num1 int, num2 int) {
-	sum := num1 + num2
+// func add(num1 int, num2 int) {
+// 	sum := num1 + num2
 
-	fmt.Println(sum)
-}
-func minus(num1 int, num2 int) {
-	minu := num1 - num2
+// 	fmt.Println(sum)
+// }
+// func minus(num1 int, num2 int) {
+// 	minu := num1 - num2
 
-	fmt.Println(minu)
+// 	fmt.Println(minu)
+// }
+
+// func main() {
+// 	a := 122
+// 	b := 22
+
+// 	add(a, b)
+// 	minus(a, b)
+// }
+
+/// function...........2
+
+func add(a, b int) {
+	fmt.Println(a + b)
 }
 
 func main() {
-	a := 122
-	b := 22
-
-	add(a, b)
-	minus(a, b)
+	add(4, 23)
 }
