@@ -1,9 +1,6 @@
-
-/*
 package main
 
-import "fmt"
-
+/*
 func main() {
 	fmt.Println("BMI Calculator")
 
@@ -45,10 +42,6 @@ func main() {
 */
 
 /*
-package main
-
-import "fmt"
-
 func main() {
 	
 	fmt.Println("Grade Calculator")
@@ -67,30 +60,26 @@ func main() {
 	fmt.Println("Your mark is:", mark)
 
 	if mark > 100 || mark < 0 {
-	fmt.Println("Invalid Mark")
-} else if mark >= 80 {
-	fmt.Println("A+")
-} else if mark >= 70 {
-	fmt.Println("A")
-} else if mark >= 60 {
-	fmt.Println("A-")
-} else if mark >= 50 {
-	fmt.Println("B")
-} else if mark >= 40 {
-	fmt.Println("C")
-} else if mark >= 33 {
-	fmt.Println("D")
-} else {
-	fmt.Println("F")
-}
+		fmt.Println("Invalid Mark")
+	} else if mark >= 80 {
+		fmt.Println("A+")
+	} else if mark >= 70 {
+		fmt.Println("A")
+	} else if mark >= 60 {
+		fmt.Println("A-")
+	} else if mark >= 50 {
+		fmt.Println("B")
+	} else if mark >= 40 {
+		fmt.Println("C")
+	} else if mark >= 33 {
+		fmt.Println("D")
+	} else {
+		fmt.Println("F")
+	}
 }
 */
 
 /*
-package main
-
-import "fmt"
-
 func main() {
 
 	correctUsername := "sujon"
@@ -120,8 +109,7 @@ func main() {
 }
 */
 
-package main
-
+/*
 import (
 	"fmt"
 	"math"
@@ -230,3 +218,4 @@ func main() {
 		}
 	}
 }
+*/
