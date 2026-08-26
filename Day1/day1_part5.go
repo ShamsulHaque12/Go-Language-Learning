@@ -2,7 +2,7 @@
 
 package main
 
-import "fmt"
+// import "fmt"
 
 /*
 func main() {
@@ -55,7 +55,7 @@ func main() {
 	fmt.Println()
 }
 */
-
+/*
 func main() {
 
 	fmt.Println("Task 3: Map")
@@ -87,3 +87,4 @@ func main() {
 	fmt.Println(student)
 	fmt.Println()
 }
+	*/
