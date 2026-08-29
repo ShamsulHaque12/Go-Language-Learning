@@ -1,5 +1,6 @@
 package main
 
+/*
 import "fmt"
 
 type Product struct {
@@ -127,3 +128,4 @@ func main() {
 	fmt.Printf("Grand Total (With Discount): %.2f\n", grandTotalWithDiscount)
 	fmt.Println("======================================")
 }
+*/
