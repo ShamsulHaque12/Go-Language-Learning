@@ -1,5 +1,6 @@
 package main
 
+/*
 import (
 	"fmt"
 )
@@ -96,3 +97,5 @@ func main() {
 		fmt.Println("\nInvalid option selected!")
 	}
 }
+
+*/
