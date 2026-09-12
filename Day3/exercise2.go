@@ -1,5 +1,6 @@
 package main
 
+/*
 import "fmt"
 
 type Dog struct {
@@ -74,3 +75,5 @@ func main() {
 	checkTypeWithAssertion(a2)
 	checkTypeWithSwitch(a2)
 }
+
+*/
