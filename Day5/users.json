@@ -1,0 +1,16 @@
+[
+  {
+    "id": 1,
+    "name": "Sujon",
+    "email": "sujon@gmail.com",
+    "age": 27,
+    "role": "Flutter Developer"
+  },
+  {
+    "id": 2,
+    "name": "Rahim",
+    "email": "rahim@gmail.com",
+    "age": 26,
+    "role": "Senior Go Developer"
+  }
+]
