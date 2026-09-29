@@ -1,0 +1,18 @@
+[
+  {
+    "id": 1,
+    "name": "MD Sujon Islam",
+    "age": 26,
+    "email": "sujon@gmail.com",
+    "role": "Go Developer",
+    "is_active": true
+  },
+  {
+    "id": 2,
+    "name": "Sujon",
+    "age": 26,
+    "email": "sujon@gmail.com",
+    "role": "Admin",
+    "is_active": true
+  }
+]
