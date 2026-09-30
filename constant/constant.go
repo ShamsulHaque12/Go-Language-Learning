@@ -1,5 +1,5 @@
 package main
-
+/*
 import "fmt"
 
 // const dile sei valu r cng hoy na...........
@@ -17,3 +17,5 @@ func main() {
 	age = 30
 	fmt.Println("new age is ", age)
 }
+
+*/
