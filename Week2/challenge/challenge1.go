@@ -1,5 +1,6 @@
 package main
 
+/*
 import (
 	"encoding/json"
 	"fmt"
@@ -90,3 +91,5 @@ func main() {
 		fmt.Println("Error starting server:", err)
 	}
 }
+
+*/
