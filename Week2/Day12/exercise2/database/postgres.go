@@ -1,5 +1,6 @@
 package database
 
+/*
 import (
 	"database/sql"
 	"fmt"
@@ -45,3 +46,5 @@ func CreateUsersTable(db *sql.DB) error {
 	fmt.Println("Users table checked/created successfully!")
 	return nil
 }
+
+*/

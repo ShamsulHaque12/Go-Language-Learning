@@ -1,5 +1,6 @@
 package service
 
+/*
 import (
 	"go-language-learning/Week2/Day12/exercise2/models"
 	"go-language-learning/Week2/Day12/exercise2/repository"
@@ -82,3 +83,5 @@ func (s *userService) PatchUser(id int, req *models.PatchUserRequest) (*models.U
 func (s *userService) DeleteUser(id int) error {
 	return s.repo.Delete(id)
 }
+
+*/

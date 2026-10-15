@@ -1,5 +1,6 @@
 package handler
 
+/*
 import (
 	"database/sql"
 	"errors"
@@ -196,3 +197,5 @@ func (h *UserHandler) handleError(c *gin.Context, err error) {
 		"error":  "Internal server error",
 	})
 }
+
+*/

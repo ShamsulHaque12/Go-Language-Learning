@@ -1,5 +1,6 @@
 package repository
 
+/*
 import (
 	"database/sql"
 	"fmt"
@@ -110,3 +111,5 @@ func (r *userRepository) Delete(id int) error {
 
 	return nil
 }
+
+*/

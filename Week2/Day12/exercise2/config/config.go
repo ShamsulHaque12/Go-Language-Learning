@@ -1,5 +1,6 @@
 package config
 
+/*
 import (
 	"log"
 	"os"
@@ -30,3 +31,5 @@ func LoadConfig() *Config {
 		DatabaseURL: dbURL,
 	}
 }
+
+*/

@@ -1,5 +1,6 @@
 package models
 
+/*
 type User struct {
 	ID       int    `json:"id"`
 	Name     string `json:"name"`
@@ -28,3 +29,5 @@ type PatchUserRequest struct {
 	Age      *int    `json:"age" binding:"omitempty,gt=0,lte=150"`
 	IsActive *bool   `json:"is_active"`
 }
+
+*/
