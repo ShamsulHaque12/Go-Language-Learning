@@ -32,7 +32,30 @@ func TransferBalance(
 	}
 	defer tx.Rollback()
 
-	// টাকা পাঠানোর account থেকে balance কমানো।
+	// সব transfer-এ account ID-এর একই ক্রমে lock নেওয়া।
+	firstID, secondID := fromID, toID
+	if firstID > secondID {
+		firstID, secondID = secondID, firstID
+	}
+
+	for _, accountID := range []int{firstID, secondID} {
+		var lockedID int
+
+		err := tx.QueryRowContext(
+			ctx,
+			`SELECT id FROM accounts WHERE id = $1 FOR UPDATE`,
+			accountID,
+		).Scan(&lockedID)
+
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("account %d not found", accountID)
+			}
+			return fmt.Errorf("failed to lock account %d: %w", accountID, err)
+		}
+	}
+
+	// Sender-এর পর্যাপ্ত balance আছে কি না যাচাই করে debit করা।
 	result, err := tx.ExecContext(
 		ctx,
 		`UPDATE accounts
@@ -50,10 +73,10 @@ func TransferBalance(
 		return fmt.Errorf("failed to check source account: %w", err)
 	}
 	if rows != 1 {
-		return errors.New("source account not found or insufficient balance")
+		return errors.New("insufficient balance")
 	}
 
-	// টাকা গ্রহণকারী account-এ balance যোগ করা।
+	// Receiver-এর balance বাড়ানো।
 	result, err = tx.ExecContext(
 		ctx,
 		`UPDATE accounts
@@ -74,7 +97,6 @@ func TransferBalance(
 		return errors.New("destination account not found")
 	}
 
-	// সব operation সফল হলে পরিবর্তন স্থায়ী করা।
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}

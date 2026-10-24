@@ -233,3 +233,95 @@ func TestTransferBalance_Concurrent_Integration(t *testing.T) {
 			senderBalance, receiverBalance)
 	}
 }
+
+func TestTransferBalance_OppositeDirections_Concurrent_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	var accountA, accountB int
+
+	err := db.QueryRow(`
+		INSERT INTO accounts (name, balance)
+		VALUES ('Day17 Test Opposite A', 10000)
+		RETURNING id
+	`).Scan(&accountA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.QueryRow(`
+		INSERT INTO accounts (name, balance)
+		VALUES ('Day17 Test Opposite B', 10000)
+		RETURNING id
+	`).Scan(&accountB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 20
+
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		fromID, toID := accountA, accountB
+
+		if i%2 != 0 {
+			fromID, toID = accountB, accountA
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- TransferBalance(
+				context.Background(),
+				db,
+				fromID,
+				toID,
+				100,
+			)
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Errorf("opposite-direction transfer failed: %v", err)
+		}
+	}
+
+	var balanceA, balanceB int64
+
+	err = db.QueryRow(
+		"SELECT balance FROM accounts WHERE id = $1", accountA,
+	).Scan(&balanceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.QueryRow(
+		"SELECT balance FROM accounts WHERE id = $1", accountB,
+	).Scan(&balanceB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if balanceA != 10000 {
+		t.Errorf("expected account A balance 10000, got %d", balanceA)
+	}
+
+	if balanceB != 10000 {
+		t.Errorf("expected account B balance 10000, got %d", balanceB)
+	}
+
+	if balanceA+balanceB != 20000 {
+		t.Errorf("money conservation failed: total balance = %d",
+			balanceA+balanceB)
+	}
+}
