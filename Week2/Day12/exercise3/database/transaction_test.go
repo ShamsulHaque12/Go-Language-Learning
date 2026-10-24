@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/lib/pq"
 )
 
@@ -155,5 +156,53 @@ func TestTransferBalanceWithRetry_CanceledDuringRetry(t *testing.T) {
 
 	if attempts != 1 {
 		t.Fatalf("expected 1 attempt, got %d", attempts)
+	}
+}
+
+func TestTransferBalanceWithRetry_RollbackOnCreditFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock database: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+
+	mock.ExpectBegin()
+
+	// Lock the source account first.
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+
+	// Lock the destination account.
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+
+	// Debit succeeds.
+	mock.ExpectExec("UPDATE accounts").
+		WithArgs(int64(100), 1).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// Credit fails.
+	mock.ExpectExec("UPDATE accounts").
+		WithArgs(int64(100), 2).
+		WillReturnError(errors.New("simulated credit failure"))
+
+	// The transaction must roll back.
+	mock.ExpectRollback()
+
+	err = TransferBalance(ctx, db, 1, 2, 100)
+	if err == nil {
+		t.Fatal("expected transfer to fail when credit operation fails")
+	}
+
+	if !strings.Contains(err.Error(), "failed to credit account") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet SQL expectations: %v", err)
 	}
 }
