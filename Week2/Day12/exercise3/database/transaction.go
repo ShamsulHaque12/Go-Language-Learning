@@ -5,6 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/lib/pq"
+)
+
+const (
+	maxTransferAttempts = 3
+	initialRetryDelay   = 50 * time.Millisecond
 )
 
 func TransferBalance(
@@ -26,13 +34,86 @@ func TransferBalance(
 		return fmt.Errorf("transaction context canceled: %w", err)
 	}
 
+	return transferBalanceWithRetry(
+		ctx,
+		func() error {
+			return transferBalanceOnce(ctx, db, fromID, toID, amount)
+		},
+		isDeadlockError,
+	)
+}
+
+// transferBalanceWithRetry retries only errors identified as deadlocks.
+// Each attempt must start a completely new transaction.
+func transferBalanceWithRetry(
+	ctx context.Context,
+	transfer func() error,
+	isDeadlock func(error) bool,
+) error {
+	for attempt := 1; attempt <= maxTransferAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("transaction context canceled: %w", err)
+		}
+
+		err := transfer()
+		if err == nil {
+			return nil
+		}
+
+		if !isDeadlock(err) {
+			return err
+		}
+
+		if attempt == maxTransferAttempts {
+			return fmt.Errorf(
+				"transfer failed after %d attempts due to deadlock: %w",
+				attempt,
+				err,
+			)
+		}
+
+		delay := initialRetryDelay * time.Duration(1<<(attempt-1))
+		timer := time.NewTimer(delay)
+
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return fmt.Errorf(
+				"transaction context canceled during retry: %w",
+				ctx.Err(),
+			)
+
+		case <-timer.C:
+		}
+	}
+
+	return nil
+}
+
+func isDeadlockError(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.SQLState() == "40P01"
+}
+
+func transferBalanceOnce(
+	ctx context.Context,
+	db *sql.DB,
+	fromID int,
+	toID int,
+	amount int64,
+) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// সব transfer-এ account ID-এর একই ক্রমে lock নেওয়া।
+	// Lock accounts in a consistent ID order to reduce deadlock risk.
 	firstID, secondID := fromID, toID
 	if firstID > secondID {
 		firstID, secondID = secondID, firstID
@@ -55,7 +136,6 @@ func TransferBalance(
 		}
 	}
 
-	// Sender-এর পর্যাপ্ত balance আছে কি না যাচাই করে debit করা।
 	result, err := tx.ExecContext(
 		ctx,
 		`UPDATE accounts
@@ -76,7 +156,6 @@ func TransferBalance(
 		return errors.New("insufficient balance")
 	}
 
-	// Receiver-এর balance বাড়ানো।
 	result, err = tx.ExecContext(
 		ctx,
 		`UPDATE accounts

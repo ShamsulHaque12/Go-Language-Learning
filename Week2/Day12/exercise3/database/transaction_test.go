@@ -2,8 +2,11 @@ package database
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/lib/pq"
 )
 
 func TestTransferBalance_InvalidAmount(t *testing.T) {
@@ -49,5 +52,77 @@ func TestTransferBalance_CanceledContext(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "canceled") {
 		t.Errorf("expected context cancellation error, got: %v", err)
+	}
+}
+
+func TestTransferBalanceWithRetry_SucceedsAfterDeadlock(t *testing.T) {
+	ctx := context.Background()
+	attempts := 0
+
+	err := transferBalanceWithRetry(
+		ctx,
+		func() error {
+			attempts++
+			if attempts < 3 {
+				return &pq.Error{Code: "40P01"}
+			}
+			return nil
+		},
+		isDeadlockError,
+	)
+
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got: %v", err)
+	}
+
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestTransferBalanceWithRetry_NoRetryForOtherError(t *testing.T) {
+	attempts := 0
+	expectedErr := errors.New("database unavailable")
+
+	err := transferBalanceWithRetry(
+		context.Background(),
+		func() error {
+			attempts++
+			return expectedErr
+		},
+		isDeadlockError,
+	)
+
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected original error, got: %v", err)
+	}
+
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
+	}
+}
+
+func TestTransferBalanceWithRetry_StopsAfterMaxAttempts(t *testing.T) {
+	attempts := 0
+
+	err := transferBalanceWithRetry(
+		context.Background(),
+		func() error {
+			attempts++
+			return &pq.Error{Code: "40P01"}
+		},
+		isDeadlockError,
+	)
+
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+
+	if attempts != maxTransferAttempts {
+		t.Fatalf(
+			"expected %d attempts, got %d",
+			maxTransferAttempts,
+			attempts,
+		)
 	}
 }
