@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -52,8 +53,43 @@ func TestTransferBalance_CanceledContext(t *testing.T) {
 		t.Fatal("expected error for canceled context")
 	}
 
-	if !strings.Contains(err.Error(), "canceled") {
-		t.Errorf("expected context cancellation error, got: %v", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got: %v", err)
+	}
+}
+
+func TestIsDeadlockError_DirectDeadlock(t *testing.T) {
+	err := &pq.Error{Code: "40P01"}
+
+	if !isDeadlockError(err) {
+		t.Fatal("expected PostgreSQL deadlock error to be detected")
+	}
+}
+
+func TestIsDeadlockError_WrappedDeadlock(t *testing.T) {
+	err := fmt.Errorf(
+		"transfer failed: %w",
+		&pq.Error{Code: "40P01"},
+	)
+
+	if !isDeadlockError(err) {
+		t.Fatal("expected wrapped PostgreSQL deadlock error to be detected")
+	}
+}
+
+func TestIsDeadlockError_OtherSQLState(t *testing.T) {
+	err := &pq.Error{Code: "23505"} // Unique constraint violation
+
+	if isDeadlockError(err) {
+		t.Fatal("expected non-deadlock error not to be detected as a deadlock")
+	}
+}
+
+func TestIsDeadlockError_OrdinaryError(t *testing.T) {
+	err := errors.New("database unavailable")
+
+	if isDeadlockError(err) {
+		t.Fatal("expected ordinary error not to be detected as a deadlock")
 	}
 }
 
@@ -118,6 +154,14 @@ func TestTransferBalanceWithRetry_StopsAfterMaxAttempts(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected error after exhausting retries")
+	}
+
+	if !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Errorf("expected retry exhaustion message, got: %v", err)
+	}
+
+	if !errors.As(err, new(*pq.Error)) {
+		t.Errorf("expected the original PostgreSQL error to remain accessible, got: %v", err)
 	}
 
 	if attempts != maxTransferAttempts {
