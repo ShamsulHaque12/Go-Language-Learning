@@ -40,6 +40,7 @@ func TestTransferBalance_SameAccount(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
 func TestTransferBalance_CanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -124,5 +125,35 @@ func TestTransferBalanceWithRetry_StopsAfterMaxAttempts(t *testing.T) {
 			maxTransferAttempts,
 			attempts,
 		)
+	}
+}
+
+func TestTransferBalanceWithRetry_CanceledDuringRetry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	attempts := 0
+
+	err := transferBalanceWithRetry(
+		ctx,
+		func() error {
+			attempts++
+			cancel()
+
+			return &pq.Error{Code: "40P01"}
+		},
+		isDeadlockError,
+	)
+
+	if err == nil {
+		t.Fatal("expected error when context is canceled during retry")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
 	}
 }
