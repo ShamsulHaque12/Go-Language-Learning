@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -33,50 +34,103 @@ func setupAccountsTest(t *testing.T) (*sql.DB, func()) {
 		t.Fatalf("failed to create accounts table: %v", err)
 	}
 
-	_, err = db.Exec(
-		"DELETE FROM accounts WHERE name LIKE 'Day17 Test %'",
-	)
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS transfer_requests (
+			idempotency_key TEXT PRIMARY KEY,
+			from_account_id INTEGER NOT NULL,
+			to_account_id INTEGER NOT NULL,
+			amount BIGINT NOT NULL CHECK (amount > 0),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
 	if err != nil {
 		db.Close()
-		t.Fatalf("failed to clean test accounts: %v", err)
+		t.Fatalf("failed to create transfer_requests table: %v", err)
+	}
+
+	cleanupTestData := func() error {
+		_, err := db.Exec(`
+			DELETE FROM transfer_requests
+			WHERE idempotency_key LIKE 'Day22 Test %'
+		`)
+		if err != nil {
+			return err
+		}
+
+		_, err = db.Exec(`
+			DELETE FROM accounts
+			WHERE name LIKE 'Day17 Test %'
+		`)
+		return err
+	}
+
+	if err := cleanupTestData(); err != nil {
+		db.Close()
+		t.Fatalf("failed to clean test data: %v", err)
 	}
 
 	cleanup := func() {
-		_, err := db.Exec(
-			"DELETE FROM accounts WHERE name LIKE 'Day17 Test %'",
-		)
-		if err != nil {
-			t.Errorf("failed to clean test accounts: %v", err)
+		if err := cleanupTestData(); err != nil {
+			t.Errorf("failed to clean test data: %v", err)
 		}
-		db.Close()
+		if err := db.Close(); err != nil {
+			t.Errorf("failed to close database: %v", err)
+		}
 	}
 
 	return db, cleanup
 }
 
-func TestTransferBalance_Commit_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
-	defer cleanup()
+func createTestAccounts(
+	t *testing.T,
+	db *sql.DB,
+	senderBalance, receiverBalance int64,
+) (int, int) {
+	t.Helper()
 
 	var fromID, toID int
 
 	err := db.QueryRow(`
 		INSERT INTO accounts (name, balance)
-		VALUES ('Day17 Test Sender', 1000)
+		VALUES ('Day17 Test Sender', $1)
 		RETURNING id
-	`).Scan(&fromID)
+	`, senderBalance).Scan(&fromID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	err = db.QueryRow(`
 		INSERT INTO accounts (name, balance)
-		VALUES ('Day17 Test Receiver', 200)
+		VALUES ('Day17 Test Receiver', $1)
 		RETURNING id
-	`).Scan(&toID)
+	`, receiverBalance).Scan(&toID)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	return fromID, toID
+}
+
+func getBalance(t *testing.T, db *sql.DB, accountID int) int64 {
+	t.Helper()
+
+	var balance int64
+	err := db.QueryRow(
+		`SELECT balance FROM accounts WHERE id = $1`,
+		accountID,
+	).Scan(&balance)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return balance
+}
+
+func TestTransferBalance_Commit_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	fromID, toID := createTestAccounts(t, db, 1000, 200)
 
 	if err := TransferBalance(
 		context.Background(), db, fromID, toID, 300,
@@ -84,27 +138,11 @@ func TestTransferBalance_Commit_Integration(t *testing.T) {
 		t.Fatalf("transfer failed: %v", err)
 	}
 
-	var senderBalance, receiverBalance int64
-
-	err = db.QueryRow(
-		"SELECT balance FROM accounts WHERE id = $1", fromID,
-	).Scan(&senderBalance)
-	if err != nil {
-		t.Fatal(err)
+	if got := getBalance(t, db, fromID); got != 700 {
+		t.Errorf("expected sender balance 700, got %d", got)
 	}
-
-	err = db.QueryRow(
-		"SELECT balance FROM accounts WHERE id = $1", toID,
-	).Scan(&receiverBalance)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if senderBalance != 700 {
-		t.Errorf("expected sender balance 700, got %d", senderBalance)
-	}
-	if receiverBalance != 500 {
-		t.Errorf("expected receiver balance 500, got %d", receiverBalance)
+	if got := getBalance(t, db, toID); got != 500 {
+		t.Errorf("expected receiver balance 500, got %d", got)
 	}
 }
 
@@ -112,37 +150,27 @@ func TestTransferBalance_Rollback_Integration(t *testing.T) {
 	db, cleanup := setupAccountsTest(t)
 	defer cleanup()
 
-	var fromID int
+	fromID, _ := createTestAccounts(t, db, 1000, 200)
 
+	// Use a positive account ID that does not exist.
+	var missingID int
 	err := db.QueryRow(`
-		INSERT INTO accounts (name, balance)
-		VALUES ('Day17 Test Rollback Sender', 1000)
-		RETURNING id
-	`).Scan(&fromID)
+		SELECT COALESCE(MAX(id), 0) + 1000000
+		FROM accounts
+	`).Scan(&missingID)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("failed to generate missing account ID: %v", err)
 	}
 
 	err = TransferBalance(
-		context.Background(), db, fromID, -999, 300,
+		context.Background(), db, fromID, missingID, 300,
 	)
 	if err == nil {
 		t.Fatal("expected transfer to fail for nonexistent destination")
 	}
 
-	var senderBalance int64
-	err = db.QueryRow(
-		"SELECT balance FROM accounts WHERE id = $1", fromID,
-	).Scan(&senderBalance)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if senderBalance != 1000 {
-		t.Errorf(
-			"expected sender balance 1000 after rollback, got %d",
-			senderBalance,
-		)
+	if got := getBalance(t, db, fromID); got != 1000 {
+		t.Errorf("expected sender balance 1000 after failure, got %d", got)
 	}
 }
 
@@ -150,32 +178,11 @@ func TestTransferBalance_Concurrent_Integration(t *testing.T) {
 	db, cleanup := setupAccountsTest(t)
 	defer cleanup()
 
-	ctx := context.Background()
-
-	var fromID, toID int
-
-	err := db.QueryRow(`
-		INSERT INTO accounts (name, balance)
-		VALUES ('Day17 Test Concurrent Sender', 10000)
-		RETURNING id
-	`).Scan(&fromID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = db.QueryRow(`
-		INSERT INTO accounts (name, balance)
-		VALUES ('Day17 Test Concurrent Receiver', 0)
-		RETURNING id
-	`).Scan(&toID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fromID, toID := createTestAccounts(t, db, 10000, 0)
 
 	const (
-		workers        = 10
-		amount         = int64(100)
-		initialBalance = int64(10000)
+		workers = 10
+		amount  = int64(100)
 	)
 
 	var wg sync.WaitGroup
@@ -183,10 +190,11 @@ func TestTransferBalance_Concurrent_Integration(t *testing.T) {
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-
 		go func() {
 			defer wg.Done()
-			errs <- TransferBalance(ctx, db, fromID, toID, amount)
+			errs <- TransferBalance(
+				context.Background(), db, fromID, toID, amount,
+			)
 		}()
 	}
 
@@ -199,38 +207,11 @@ func TestTransferBalance_Concurrent_Integration(t *testing.T) {
 		}
 	}
 
-	var senderBalance, receiverBalance int64
-
-	err = db.QueryRow(
-		"SELECT balance FROM accounts WHERE id = $1", fromID,
-	).Scan(&senderBalance)
-	if err != nil {
-		t.Fatal(err)
+	if got := getBalance(t, db, fromID); got != 9000 {
+		t.Errorf("expected sender balance 9000, got %d", got)
 	}
-
-	err = db.QueryRow(
-		"SELECT balance FROM accounts WHERE id = $1", toID,
-	).Scan(&receiverBalance)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expectedSender := initialBalance - workers*amount
-	expectedReceiver := int64(workers) * amount
-
-	if senderBalance != expectedSender {
-		t.Errorf("expected sender balance %d, got %d",
-			expectedSender, senderBalance)
-	}
-
-	if receiverBalance != expectedReceiver {
-		t.Errorf("expected receiver balance %d, got %d",
-			expectedReceiver, receiverBalance)
-	}
-
-	if senderBalance+receiverBalance != initialBalance {
-		t.Errorf("money conservation failed: sender=%d receiver=%d",
-			senderBalance, receiverBalance)
+	if got := getBalance(t, db, toID); got != 1000 {
+		t.Errorf("expected receiver balance 1000, got %d", got)
 	}
 }
 
@@ -238,36 +219,16 @@ func TestTransferBalance_OppositeDirections_Concurrent_Integration(t *testing.T)
 	db, cleanup := setupAccountsTest(t)
 	defer cleanup()
 
-	var accountA, accountB int
-
-	err := db.QueryRow(`
-		INSERT INTO accounts (name, balance)
-		VALUES ('Day17 Test Opposite A', 10000)
-		RETURNING id
-	`).Scan(&accountA)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = db.QueryRow(`
-		INSERT INTO accounts (name, balance)
-		VALUES ('Day17 Test Opposite B', 10000)
-		RETURNING id
-	`).Scan(&accountB)
-	if err != nil {
-		t.Fatal(err)
-	}
+	accountA, accountB := createTestAccounts(t, db, 10000, 10000)
 
 	const workers = 20
 
 	start := make(chan struct{})
 	errs := make(chan error, workers)
-
 	var wg sync.WaitGroup
 
 	for i := 0; i < workers; i++ {
 		fromID, toID := accountA, accountB
-
 		if i%2 != 0 {
 			fromID, toID = accountB, accountA
 		}
@@ -277,11 +238,7 @@ func TestTransferBalance_OppositeDirections_Concurrent_Integration(t *testing.T)
 			defer wg.Done()
 			<-start
 			errs <- TransferBalance(
-				context.Background(),
-				db,
-				fromID,
-				toID,
-				100,
+				context.Background(), db, fromID, toID, 100,
 			)
 		}()
 	}
@@ -296,32 +253,223 @@ func TestTransferBalance_OppositeDirections_Concurrent_Integration(t *testing.T)
 		}
 	}
 
-	var balanceA, balanceB int64
+	if got := getBalance(t, db, accountA); got != 10000 {
+		t.Errorf("expected account A balance 10000, got %d", got)
+	}
+	if got := getBalance(t, db, accountB); got != 10000 {
+		t.Errorf("expected account B balance 10000, got %d", got)
+	}
+}
 
-	err = db.QueryRow(
-		"SELECT balance FROM accounts WHERE id = $1", accountA,
-	).Scan(&balanceA)
+func TestTransferBalanceWithKey_SameRequestTwice_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	ctx := context.Background()
+	key := "Day22 Test same-request"
+
+	for i := 0; i < 2; i++ {
+		if err := TransferBalanceWithKey(
+			ctx, db, key, fromID, toID, 300,
+		); err != nil {
+			t.Fatalf("attempt %d failed: %v", i+1, err)
+		}
+	}
+
+	if got := getBalance(t, db, fromID); got != 700 {
+		t.Errorf("expected sender balance 700, got %d", got)
+	}
+	if got := getBalance(t, db, toID); got != 500 {
+		t.Errorf("expected receiver balance 500, got %d", got)
+	}
+}
+
+func TestTransferBalanceWithKey_DifferentAmountConflict_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	ctx := context.Background()
+	key := "Day22 Test amount-conflict"
+
+	if err := TransferBalanceWithKey(
+		ctx, db, key, fromID, toID, 300,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err := TransferBalanceWithKey(
+		ctx, db, key, fromID, toID, 400,
+	)
+	if !errors.Is(err, ErrIdempotencyKeyConflict) {
+		t.Fatalf("expected ErrIdempotencyKeyConflict, got %v", err)
+	}
+
+	if got := getBalance(t, db, fromID); got != 700 {
+		t.Errorf("expected sender balance 700, got %d", got)
+	}
+	if got := getBalance(t, db, toID); got != 500 {
+		t.Errorf("expected receiver balance 500, got %d", got)
+	}
+}
+
+func TestTransferBalanceWithKey_DifferentAccountsConflict_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	otherFromID, otherToID := createTestAccounts(t, db, 800, 100)
+	ctx := context.Background()
+	key := "Day22 Test account-conflict"
+
+	if err := TransferBalanceWithKey(
+		ctx, db, key, fromID, toID, 100,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err := TransferBalanceWithKey(
+		ctx, db, key, otherFromID, otherToID, 100,
+	)
+	if !errors.Is(err, ErrIdempotencyKeyConflict) {
+		t.Fatalf("expected ErrIdempotencyKeyConflict, got %v", err)
+	}
+
+	if got := getBalance(t, db, otherFromID); got != 800 {
+		t.Errorf("other sender should remain at 800, got %d", got)
+	}
+	if got := getBalance(t, db, otherToID); got != 100 {
+		t.Errorf("other receiver should remain at 100, got %d", got)
+	}
+}
+
+func TestTransferBalanceWithKey_DifferentKeys_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	ctx := context.Background()
+
+	for _, key := range []string{
+		"Day22 Test key-one",
+		"Day22 Test key-two",
+	} {
+		if err := TransferBalanceWithKey(
+			ctx, db, key, fromID, toID, 100,
+		); err != nil {
+			t.Fatalf("transfer with key %q failed: %v", key, err)
+		}
+	}
+
+	if got := getBalance(t, db, fromID); got != 800 {
+		t.Errorf("expected sender balance 800, got %d", got)
+	}
+	if got := getBalance(t, db, toID); got != 400 {
+		t.Errorf("expected receiver balance 400, got %d", got)
+	}
+}
+
+func TestTransferBalanceWithKey_FailedTransferCanRetry_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	fromID, toID := createTestAccounts(t, db, 100, 200)
+	ctx := context.Background()
+	key := "Day22 Test retry-after-failure"
+
+	err := TransferBalanceWithKey(ctx, db, key, fromID, toID, 300)
+	if err == nil {
+		t.Fatal("expected insufficient balance error")
+	}
+
+	if got := getBalance(t, db, fromID); got != 100 {
+		t.Errorf("sender balance changed after failed transfer: %d", got)
+	}
+	if got := getBalance(t, db, toID); got != 200 {
+		t.Errorf("receiver balance changed after failed transfer: %d", got)
+	}
+
+	// Correct the balance, then retry with the same key.
+	_, err = db.Exec(
+		`UPDATE accounts SET balance = 500 WHERE id = $1`,
+		fromID,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = db.QueryRow(
-		"SELECT balance FROM accounts WHERE id = $1", accountB,
-	).Scan(&balanceB)
-	if err != nil {
-		t.Fatal(err)
+	if err := TransferBalanceWithKey(
+		ctx, db, key, fromID, toID, 300,
+	); err != nil {
+		t.Fatalf("retry after failed transfer failed: %v", err)
 	}
 
-	if balanceA != 10000 {
-		t.Errorf("expected account A balance 10000, got %d", balanceA)
+	if got := getBalance(t, db, fromID); got != 200 {
+		t.Errorf("expected sender balance 200, got %d", got)
+	}
+	if got := getBalance(t, db, toID); got != 500 {
+		t.Errorf("expected receiver balance 500, got %d", got)
+	}
+}
+
+func TestTransferBalanceWithKey_ConcurrentSameKey_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	ctx := context.Background()
+	key := "Day22 Test concurrent-same-key"
+
+	const workers = 10
+
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- TransferBalanceWithKey(
+				ctx, db, key, fromID, toID, 300,
+			)
+		}()
 	}
 
-	if balanceB != 10000 {
-		t.Errorf("expected account B balance 10000, got %d", balanceB)
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent idempotent transfer failed: %v", err)
+		}
 	}
 
-	if balanceA+balanceB != 20000 {
-		t.Errorf("money conservation failed: total balance = %d",
-			balanceA+balanceB)
+	if got := getBalance(t, db, fromID); got != 700 {
+		t.Errorf("expected sender balance 700, got %d", got)
+	}
+	if got := getBalance(t, db, toID); got != 500 {
+		t.Errorf("expected receiver balance 500, got %d", got)
+	}
+}
+
+func TestTransferBalanceWithKey_EmptyKey_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	fromID, toID := createTestAccounts(t, db, 1000, 200)
+
+	err := TransferBalanceWithKey(
+		context.Background(), db, "   ", fromID, toID, 100,
+	)
+	if err == nil {
+		t.Fatal("expected empty idempotency key to fail")
+	}
+
+	if got := getBalance(t, db, fromID); got != 1000 {
+		t.Errorf("sender balance changed unexpectedly: %d", got)
 	}
 }
