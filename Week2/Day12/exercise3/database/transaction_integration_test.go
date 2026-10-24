@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"sync"
 	"testing"
 )
 
@@ -142,5 +143,93 @@ func TestTransferBalance_Rollback_Integration(t *testing.T) {
 			"expected sender balance 1000 after rollback, got %d",
 			senderBalance,
 		)
+	}
+}
+
+func TestTransferBalance_Concurrent_Integration(t *testing.T) {
+	db, cleanup := setupAccountsTest(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	var fromID, toID int
+
+	err := db.QueryRow(`
+		INSERT INTO accounts (name, balance)
+		VALUES ('Day17 Test Concurrent Sender', 10000)
+		RETURNING id
+	`).Scan(&fromID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.QueryRow(`
+		INSERT INTO accounts (name, balance)
+		VALUES ('Day17 Test Concurrent Receiver', 0)
+		RETURNING id
+	`).Scan(&toID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		workers        = 10
+		amount         = int64(100)
+		initialBalance = int64(10000)
+	)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+			errs <- TransferBalance(ctx, db, fromID, toID, amount)
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent transfer failed: %v", err)
+		}
+	}
+
+	var senderBalance, receiverBalance int64
+
+	err = db.QueryRow(
+		"SELECT balance FROM accounts WHERE id = $1", fromID,
+	).Scan(&senderBalance)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.QueryRow(
+		"SELECT balance FROM accounts WHERE id = $1", toID,
+	).Scan(&receiverBalance)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedSender := initialBalance - workers*amount
+	expectedReceiver := int64(workers) * amount
+
+	if senderBalance != expectedSender {
+		t.Errorf("expected sender balance %d, got %d",
+			expectedSender, senderBalance)
+	}
+
+	if receiverBalance != expectedReceiver {
+		t.Errorf("expected receiver balance %d, got %d",
+			expectedReceiver, receiverBalance)
+	}
+
+	if senderBalance+receiverBalance != initialBalance {
+		t.Errorf("money conservation failed: sender=%d receiver=%d",
+			senderBalance, receiverBalance)
 	}
 }
