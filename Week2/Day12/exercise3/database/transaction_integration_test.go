@@ -4,18 +4,39 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/joho/godotenv"
 )
 
-func setupAccountsTest(t *testing.T) (*sql.DB, func()) {
+func setupAccountsTest(t *testing.T) (*sql.DB, func(), string) {
 	t.Helper()
+
+	// Prefer an explicitly exported environment variable. If it is absent,
+	// try the exercise's .env file without printing credentials.
+	if os.Getenv("DATABASE_URL") == "" {
+		for _, envPath := range []string{
+			"../.env",
+			"Week2/Day12/exercise3/.env",
+			".env",
+		} {
+			if err := godotenv.Load(envPath); err == nil && os.Getenv("DATABASE_URL") != "" {
+				break
+			}
+		}
+	}
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("Skipping integration test: DATABASE_URL is not set")
 	}
+
+	// A unique prefix ensures cleanup only touches records created by this run.
+	testPrefix := fmt.Sprintf("GoTest_%d_", time.Now().UnixNano())
 
 	db, err := ConnectDB(databaseURL)
 	if err != nil {
@@ -49,41 +70,41 @@ func setupAccountsTest(t *testing.T) (*sql.DB, func()) {
 	}
 
 	cleanupTestData := func() error {
+		// Use a literal prefix comparison. LIKE would treat underscores as
+		// wildcards, which could match unrelated records.
 		_, err := db.Exec(`
 			DELETE FROM transfer_requests
-			WHERE idempotency_key LIKE 'Day22 Test %'
-		`)
+			WHERE LEFT(idempotency_key, LENGTH($1)) = $1
+		`, testPrefix)
 		if err != nil {
 			return err
 		}
 
 		_, err = db.Exec(`
 			DELETE FROM accounts
-			WHERE name LIKE 'Day17 Test %'
-		`)
+			WHERE LEFT(name, LENGTH($1)) = $1
+		`, testPrefix)
 		return err
 	}
 
-	if err := cleanupTestData(); err != nil {
-		db.Close()
-		t.Fatalf("failed to clean test data: %v", err)
-	}
-
+	// Never clear old test data before a test starts. Only clean this run's
+	// uniquely prefixed rows after the test has completed.
 	cleanup := func() {
 		if err := cleanupTestData(); err != nil {
-			t.Errorf("failed to clean test data: %v", err)
+			t.Errorf("failed to clean this test's data: %v", err)
 		}
 		if err := db.Close(); err != nil {
 			t.Errorf("failed to close database: %v", err)
 		}
 	}
 
-	return db, cleanup
+	return db, cleanup, testPrefix
 }
 
 func createTestAccounts(
 	t *testing.T,
 	db *sql.DB,
+	testPrefix string,
 	senderBalance, receiverBalance int64,
 ) (int, int) {
 	t.Helper()
@@ -92,18 +113,18 @@ func createTestAccounts(
 
 	err := db.QueryRow(`
 		INSERT INTO accounts (name, balance)
-		VALUES ('Day17 Test Sender', $1)
+		VALUES ($1 || 'Sender', $2)
 		RETURNING id
-	`, senderBalance).Scan(&fromID)
+	`, testPrefix, senderBalance).Scan(&fromID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	err = db.QueryRow(`
 		INSERT INTO accounts (name, balance)
-		VALUES ('Day17 Test Receiver', $1)
+		VALUES ($1 || 'Receiver', $2)
 		RETURNING id
-	`, receiverBalance).Scan(&toID)
+	`, testPrefix, receiverBalance).Scan(&toID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,10 +148,10 @@ func getBalance(t *testing.T, db *sql.DB, accountID int) int64 {
 }
 
 func TestTransferBalance_Commit_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	fromID, toID := createTestAccounts(t, db, testPrefix, 1000, 200)
 
 	if err := TransferBalance(
 		context.Background(), db, fromID, toID, 300,
@@ -147,10 +168,10 @@ func TestTransferBalance_Commit_Integration(t *testing.T) {
 }
 
 func TestTransferBalance_Rollback_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, _ := createTestAccounts(t, db, 1000, 200)
+	fromID, _ := createTestAccounts(t, db, testPrefix, 1000, 200)
 
 	// Use a positive account ID that does not exist.
 	var missingID int
@@ -175,10 +196,10 @@ func TestTransferBalance_Rollback_Integration(t *testing.T) {
 }
 
 func TestTransferBalance_Concurrent_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, toID := createTestAccounts(t, db, 10000, 0)
+	fromID, toID := createTestAccounts(t, db, testPrefix, 10000, 0)
 
 	const (
 		workers = 10
@@ -216,10 +237,10 @@ func TestTransferBalance_Concurrent_Integration(t *testing.T) {
 }
 
 func TestTransferBalance_OppositeDirections_Concurrent_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	accountA, accountB := createTestAccounts(t, db, 10000, 10000)
+	accountA, accountB := createTestAccounts(t, db, testPrefix, 10000, 10000)
 
 	const workers = 20
 
@@ -262,12 +283,12 @@ func TestTransferBalance_OppositeDirections_Concurrent_Integration(t *testing.T)
 }
 
 func TestTransferBalanceWithKey_SameRequestTwice_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	fromID, toID := createTestAccounts(t, db, testPrefix, 1000, 200)
 	ctx := context.Background()
-	key := "Day22 Test same-request"
+	key := testPrefix + "same-request"
 
 	for i := 0; i < 2; i++ {
 		if err := TransferBalanceWithKey(
@@ -286,12 +307,12 @@ func TestTransferBalanceWithKey_SameRequestTwice_Integration(t *testing.T) {
 }
 
 func TestTransferBalanceWithKey_DifferentAmountConflict_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	fromID, toID := createTestAccounts(t, db, testPrefix, 1000, 200)
 	ctx := context.Background()
-	key := "Day22 Test amount-conflict"
+	key := testPrefix + "amount-conflict"
 
 	if err := TransferBalanceWithKey(
 		ctx, db, key, fromID, toID, 300,
@@ -315,13 +336,13 @@ func TestTransferBalanceWithKey_DifferentAmountConflict_Integration(t *testing.T
 }
 
 func TestTransferBalanceWithKey_DifferentAccountsConflict_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, toID := createTestAccounts(t, db, 1000, 200)
-	otherFromID, otherToID := createTestAccounts(t, db, 800, 100)
+	fromID, toID := createTestAccounts(t, db, testPrefix, 1000, 200)
+	otherFromID, otherToID := createTestAccounts(t, db, testPrefix+"other_", 800, 100)
 	ctx := context.Background()
-	key := "Day22 Test account-conflict"
+	key := testPrefix + "account-conflict"
 
 	if err := TransferBalanceWithKey(
 		ctx, db, key, fromID, toID, 100,
@@ -345,15 +366,15 @@ func TestTransferBalanceWithKey_DifferentAccountsConflict_Integration(t *testing
 }
 
 func TestTransferBalanceWithKey_DifferentKeys_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	fromID, toID := createTestAccounts(t, db, testPrefix, 1000, 200)
 	ctx := context.Background()
 
 	for _, key := range []string{
-		"Day22 Test key-one",
-		"Day22 Test key-two",
+		testPrefix + "key-one",
+		testPrefix + "key-two",
 	} {
 		if err := TransferBalanceWithKey(
 			ctx, db, key, fromID, toID, 100,
@@ -371,12 +392,12 @@ func TestTransferBalanceWithKey_DifferentKeys_Integration(t *testing.T) {
 }
 
 func TestTransferBalanceWithKey_FailedTransferCanRetry_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, toID := createTestAccounts(t, db, 100, 200)
+	fromID, toID := createTestAccounts(t, db, testPrefix, 100, 200)
 	ctx := context.Background()
-	key := "Day22 Test retry-after-failure"
+	key := testPrefix + "retry-after-failure"
 
 	err := TransferBalanceWithKey(ctx, db, key, fromID, toID, 300)
 	if err == nil {
@@ -414,12 +435,12 @@ func TestTransferBalanceWithKey_FailedTransferCanRetry_Integration(t *testing.T)
 }
 
 func TestTransferBalanceWithKey_ConcurrentSameKey_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	fromID, toID := createTestAccounts(t, db, testPrefix, 1000, 200)
 	ctx := context.Background()
-	key := "Day22 Test concurrent-same-key"
+	key := testPrefix + "concurrent-same-key"
 
 	const workers = 10
 
@@ -457,10 +478,10 @@ func TestTransferBalanceWithKey_ConcurrentSameKey_Integration(t *testing.T) {
 }
 
 func TestTransferBalanceWithKey_EmptyKey_Integration(t *testing.T) {
-	db, cleanup := setupAccountsTest(t)
+	db, cleanup, testPrefix := setupAccountsTest(t)
 	defer cleanup()
 
-	fromID, toID := createTestAccounts(t, db, 1000, 200)
+	fromID, toID := createTestAccounts(t, db, testPrefix, 1000, 200)
 
 	err := TransferBalanceWithKey(
 		context.Background(), db, "   ", fromID, toID, 100,
@@ -473,3 +494,4 @@ func TestTransferBalanceWithKey_EmptyKey_Integration(t *testing.T) {
 		t.Errorf("sender balance changed unexpectedly: %d", got)
 	}
 }
+
