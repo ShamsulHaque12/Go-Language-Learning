@@ -9,7 +9,14 @@ import (
 )
 
 func ConnectDB(url string) (*sql.DB, error) {
-	db, err := sql.Open("postgres", url)
+	return connectDB(url, sql.Open)
+}
+
+func connectDB(
+	url string,
+	openDB func(string, string) (*sql.DB, error),
+) (*sql.DB, error) {
+	db, err := openDB("postgres", url)
 	if err != nil {
 		return nil, fmt.Errorf("database connection failed: %w", err)
 	}

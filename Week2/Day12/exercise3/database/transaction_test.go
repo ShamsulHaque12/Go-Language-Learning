@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -677,6 +678,400 @@ func TestTransferBalanceWithKeyOnce_RollbackOnLockFailure(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "failed to lock account 2") {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled SQL expectations: %v", err)
+	}
+}
+
+func TestTransferBalanceWithKeyOnce_RollbackOnDebitFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock database: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+
+	mock.ExpectExec("INSERT INTO transfer_requests").
+		WithArgs("debit-error-key", 1, 2, int64(100)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+
+	mock.ExpectExec("UPDATE accounts").
+		WithArgs(int64(100), 1).
+		WillReturnError(errors.New("debit failed"))
+
+	mock.ExpectRollback()
+
+	err = transferBalanceWithKeyOnce(
+		context.Background(), db, "debit-error-key", 1, 2, 100,
+	)
+
+	if err == nil {
+		t.Fatal("expected debit error")
+	}
+
+	if !strings.Contains(err.Error(), "failed to debit account") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled SQL expectations: %v", err)
+	}
+}
+
+func TestTransferBalanceWithKeyOnce_RollbackOnCreditFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock database: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+
+	mock.ExpectExec("INSERT INTO transfer_requests").
+		WithArgs("credit-error-key", 1, 2, int64(100)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Lock both accounts successfully.
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+
+	// Debit succeeds.
+	mock.ExpectExec("UPDATE accounts").
+		WithArgs(int64(100), 1).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// Credit fails.
+	mock.ExpectExec("UPDATE accounts").
+		WithArgs(int64(100), 2).
+		WillReturnError(errors.New("credit failed"))
+
+	mock.ExpectRollback()
+
+	err = transferBalanceWithKeyOnce(
+		context.Background(), db, "credit-error-key", 1, 2, 100,
+	)
+
+	if err == nil {
+		t.Fatal("expected credit error")
+	}
+
+	if !strings.Contains(err.Error(), "failed to credit account") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled SQL expectations: %v", err)
+	}
+}
+
+func TestTransferBalanceWithKeyOnce_TransferCommitError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock database: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+
+	mock.ExpectExec("INSERT INTO transfer_requests").
+		WithArgs("transfer-commit-error-key", 1, 2, int64(100)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Lock both accounts.
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+
+	// Debit succeeds.
+	mock.ExpectExec("UPDATE accounts").
+		WithArgs(int64(100), 1).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// Credit succeeds.
+	mock.ExpectExec("UPDATE accounts").
+		WithArgs(int64(100), 2).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// Final commit fails.
+	mock.ExpectCommit().
+		WillReturnError(errors.New("transfer commit failed"))
+
+	err = transferBalanceWithKeyOnce(
+		context.Background(),
+		db,
+		"transfer-commit-error-key",
+		1,
+		2,
+		100,
+	)
+
+	if err == nil {
+		t.Fatal("expected transfer commit error")
+	}
+
+	if !strings.Contains(err.Error(), "failed to commit transfer") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled SQL expectations: %v", err)
+	}
+}
+
+func TestTransferBalanceTx_AccountNotFound(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock database: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(1).
+		WillReturnError(sql.ErrNoRows)
+
+	mock.ExpectRollback()
+
+	err = transferBalanceTx(
+		context.Background(), tx, 1, 2, 100,
+	)
+
+	if err == nil {
+		t.Fatal("expected account not found error")
+	}
+
+	if !strings.Contains(err.Error(), "account 1 not found") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Errorf("failed to rollback transaction: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled SQL expectations: %v", err)
+	}
+}
+func TestTransferBalanceTx_DebitRowsAffectedError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock database: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+
+	mock.ExpectExec("UPDATE accounts SET balance = balance -").
+		WithArgs(int64(100), 1).
+		WillReturnResult(sqlmock.NewErrorResult(errors.New("rows affected failed")))
+
+	mock.ExpectRollback()
+
+	err = transferBalanceTx(
+		context.Background(), tx, 1, 2, 100,
+	)
+
+	if err == nil {
+		t.Fatal("expected debit rows affected error")
+	}
+
+	if !strings.Contains(err.Error(), "failed to check source account") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Errorf("failed to rollback transaction: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled SQL expectations: %v", err)
+	}
+}
+func TestTransferBalanceTx_InsufficientBalance(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock database: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+
+	mock.ExpectExec("UPDATE accounts SET balance = balance -").
+		WithArgs(int64(100), 1).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	mock.ExpectRollback()
+
+	err = transferBalanceTx(
+		context.Background(), tx, 1, 2, 100,
+	)
+
+	if err == nil {
+		t.Fatal("expected insufficient balance error")
+	}
+
+	if !strings.Contains(err.Error(), "insufficient balance") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Errorf("failed to rollback transaction: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled SQL expectations: %v", err)
+	}
+}
+func TestTransferBalanceTx_CreditRowsAffectedError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock database: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+
+	mock.ExpectExec("UPDATE accounts SET balance = balance -").
+		WithArgs(int64(100), 1).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	mock.ExpectExec("UPDATE accounts SET balance = balance \\+").
+		WithArgs(int64(100), 2).
+		WillReturnResult(sqlmock.NewErrorResult(errors.New("rows affected failed")))
+
+	mock.ExpectRollback()
+
+	err = transferBalanceTx(
+		context.Background(), tx, 1, 2, 100,
+	)
+
+	if err == nil {
+		t.Fatal("expected credit rows affected error")
+	}
+
+	if !strings.Contains(err.Error(), "failed to check destination account") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Errorf("failed to rollback transaction: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled SQL expectations: %v", err)
+	}
+}
+func TestTransferBalanceTx_DestinationNotFound(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock database: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+
+	mock.ExpectQuery("SELECT id FROM accounts WHERE id = \\$1 FOR UPDATE").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+
+	mock.ExpectExec("UPDATE accounts SET balance = balance -").
+		WithArgs(int64(100), 1).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	mock.ExpectExec("UPDATE accounts SET balance = balance \\+").
+		WithArgs(int64(100), 2).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	mock.ExpectRollback()
+
+	err = transferBalanceTx(
+		context.Background(), tx, 1, 2, 100,
+	)
+
+	if err == nil {
+		t.Fatal("expected destination account not found error")
+	}
+
+	if !strings.Contains(err.Error(), "destination account not found") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Errorf("failed to rollback transaction: %v", err)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
